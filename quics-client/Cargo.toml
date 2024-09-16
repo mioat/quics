@@ -1,0 +1,21 @@
+[package]
+name = "quics-client"
+version = "0.1.0"
+edition = "2021"
+
+[features]
+default = ["trace", "aws-lc-rs"]
+trace = ["tracing", "tracing-subscriber"]
+
+[dependencies]
+quics-protocol = { path = "../quics-protocol"}
+
+clap = { version = "4.5", features = ["std", "derive", "help", "usage"], default-features = false }
+tokio = { version = "1", features = ["rt-multi-thread", "io-util", "sync"], default-features = false }
+s2n-quic = { version = "1", features = ["provider-tls-s2n", "provider-address-token-default"], default-features = false }
+
+tracing = { version = "0.1", optional = true }
+tracing-subscriber = { version = "0.3", optional = true }
+
+# https://aws.github.io/aws-lc-rs/platform_support.html
+aws-lc-rs = { version = "1", features = ["bindgen"], default-features = false, optional = true }
