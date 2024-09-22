@@ -6,6 +6,18 @@ pub struct Stream<T> {
 
 pub struct Builder<T> {
     connection: T,
+
+    #[cfg(feature = "limit-connection-reuses")]
+    connection_reuses: Option<usize>,
+}
+
+impl<T> Builder<T> {
+    #[cfg(feature = "limit-connection-reuses")]
+    pub fn with_connection_reuses(mut self, value: Option<usize>) -> Self {
+        self.connection_reuses = value;
+
+        self
+    }
 }
 
 mod s2n_quic {
@@ -23,7 +35,12 @@ mod s2n_quic {
         T: Provider<NoiseConnection> + 'static,
     {
         pub fn new(connection: T) -> Self {
-            Self { connection }
+            Self {
+                connection,
+
+                #[cfg(feature = "limit-connection-reuses")]
+                connection_reuses: None,
+            }
         }
 
         pub fn build(mut self) -> impl Provider<BidirectionalStream> {
@@ -31,7 +48,17 @@ mod s2n_quic {
 
             tokio::spawn(async move {
                 'connection: while let Some(mut connection) = self.connection.fetch().await {
+                    #[cfg(feature = "limit-connection-reuses")]
+                    let mut connection_reuses = 0;
+
                     'stream: loop {
+                        #[cfg(feature = "limit-connection-reuses")]
+                        if let Some(value) = self.connection_reuses {
+                            if connection_reuses >= value {
+                                break 'stream;
+                            }
+                        }
+
                         let stream = match connection.open_bidirectional_stream().await {
                             Ok(stream) => stream,
                             Err(_error) => {
@@ -53,6 +80,11 @@ mod s2n_quic {
 
                         if let Err(_error) = stream_sender.send(stream).await {
                             break 'connection;
+                        }
+
+                        #[cfg(feature = "limit-connection-reuses")]
+                        {
+                            connection_reuses += 1;
                         }
                     }
                 }
