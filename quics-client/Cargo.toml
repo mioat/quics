@@ -4,8 +4,9 @@ version = "0.1.0"
 edition = "2021"
 
 [features]
-default = ["trace", "aws-lc-rs"]
+default = ["trace", "aws-lc-rs", "limit-connection-reuses"]
 trace = ["tracing", "tracing-subscriber"]
+limit-connection-reuses = []
 
 [dependencies]
 quics-protocol = { path = "../quics-protocol"}

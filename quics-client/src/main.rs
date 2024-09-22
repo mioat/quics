@@ -30,6 +30,15 @@ struct Args {
     #[arg(long, default_value = None)]
     tls_cert: Option<String>,
 
+    /// Limit the number of concurrent instances of the client
+    #[arg(long, default_value = None)]
+    limit_concurrent_instances: Option<usize>,
+
+    #[cfg(feature = "limit-connection-reuses")]
+    /// Limit the number of connection reuses
+    #[arg(long, default_value = None)]
+    limit_connection_reuses: Option<usize>,
+
     /// Initial congestion window size in bytes
     #[arg(long, default_value = None)]
     initial_congestion_window: Option<u32>,
@@ -49,29 +58,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .with_max_level(args.tracing_level)
         .init();
 
-    let client = {
-        use std::path::Path;
+    let client = match args.limit_concurrent_instances {
+        Some(num) => (0..num)
+            .map(|_| s2n_quic_client::build(&args))
+            .collect::<Result<Vec<_>, _>>()?,
 
-        use s2n_quic::provider::congestion_controller;
-        use s2n_quic::Client as NoiseClient;
-
-        let controller = {
-            let controller = congestion_controller::bbr::Builder::default();
-            let controller = match args.initial_congestion_window {
-                Some(value) => controller.with_initial_congestion_window(value),
-                None => controller,
-            };
-            controller.build()
-        };
-
-        let client = NoiseClient::builder()
-            .with_io(args.bind.as_str())?
-            .with_congestion_controller(controller)?;
-
-        match args.tls_cert {
-            Some(path) => client.with_tls(Path::new(path.as_str()))?.start()?,
-            None => client.start()?,
-        }
+        None => vec![s2n_quic_client::build(&args)?],
     };
 
     let server_name = match args.tls_sni {
@@ -90,11 +82,49 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .ok_or(format!("unable to resolve address {}", args.remote))?;
 
     let connection = ConnectionBuilder::new(client, server_name, server_address).build();
-    let stream = StreamBuilder::new(connection).build();
+
+    let stream_builder = StreamBuilder::new(connection);
+
+    #[cfg(feature = "limit-connection-reuses")]
+    let stream_builder = stream_builder.with_connection_reuses(args.limit_connection_reuses);
+
+    let stream = stream_builder.build();
 
     let socks_server = Socks5::with(args.listen).await?;
 
     Client::with(socks_server, stream).start().await;
 
     Ok(())
+}
+
+mod s2n_quic_client {
+    use std::error::Error;
+
+    use s2n_quic::provider::congestion_controller;
+    use s2n_quic::Client as NoiseClient;
+    use std::path::Path;
+
+    use super::Args;
+
+    pub fn build(args: &Args) -> Result<NoiseClient, Box<dyn Error>> {
+        let controller = {
+            let controller = congestion_controller::bbr::Builder::default();
+            let controller = match args.initial_congestion_window {
+                Some(value) => controller.with_initial_congestion_window(value),
+                None => controller,
+            };
+            controller.build()
+        };
+
+        let client = NoiseClient::builder()
+            .with_io(args.bind.as_str())?
+            .with_congestion_controller(controller)?;
+
+        let client = match &args.tls_cert {
+            Some(path) => client.with_tls(Path::new(path.as_str()))?.start()?,
+            None => client.start()?,
+        };
+
+        Ok(client)
+    }
 }

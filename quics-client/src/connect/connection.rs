@@ -14,7 +14,7 @@ pub struct Builder<T> {
 
 mod s2n_quic {
     use s2n_quic::{
-        client::{Client as NoiseClient, Connect},
+        client::{Client as NoiseClient, Connect as NoiseConnect},
         Connection as NoiseConnection,
     };
     use tokio::sync::mpsc;
@@ -24,10 +24,10 @@ mod s2n_quic {
 
     use super::{Builder, Connection, Provider, SocketAddr};
 
-    impl Builder<NoiseClient> {
-        pub fn new<T>(client: NoiseClient, server_name: String, server_addr: T) -> Self
+    impl<T> Builder<T> {
+        pub fn new<U>(client: T, server_name: String, server_addr: U) -> Self
         where
-            T: Into<SocketAddr>,
+            U: Into<SocketAddr>,
         {
             Self {
                 client,
@@ -36,42 +36,22 @@ mod s2n_quic {
             }
         }
 
-        pub fn build(self) -> impl Provider<NoiseConnection> {
+        pub fn build(self) -> impl Provider<NoiseConnection>
+        where
+            T: IntoIterator<Item = NoiseClient> + Send + 'static,
+            <T as IntoIterator>::IntoIter: Clone + Send,
+        {
             let (connection_sender, connection_receiver) = mpsc::channel(1usize);
+            let server_name = self.server_name;
+            let server_addr = self.server_addr;
+            let clients = self.client.into_iter().cycle();
 
             tokio::spawn(async move {
-                'connection: loop {
-                    let connect =
-                        Connect::new(self.server_addr).with_server_name(self.server_name.as_str());
-
-                    let mut connection = match self.client.connect(connect).await {
-                        Ok(value) => value,
-                        Err(error) => {
-                            error!(
-                                "{:?} failed to establish connection with {}. {}",
-                                self.client.local_addr(),
-                                self.server_name,
-                                error
-                            );
-
-                            continue;
+                'connection: for client in clients {
+                    if let Some(connection) = connect(&client, &server_name, server_addr).await {
+                        if connection_sender.send(connection).await.is_err() {
+                            break 'connection;
                         }
-                    };
-
-                    if let Err(_error) = connection.keep_alive(true) {
-                        error!("failed to keep alive the connection. {}", _error);
-                        continue;
-                    };
-
-                    debug!(
-                        "{:?} establish connection {} with {:?}",
-                        connection.local_addr(),
-                        connection.id(),
-                        connection.remote_addr()
-                    );
-
-                    if let Err(_error) = connection_sender.send(connection).await {
-                        break 'connection;
                     }
                 }
             });
@@ -80,6 +60,40 @@ mod s2n_quic {
                 inner: connection_receiver,
             }
         }
+    }
+
+    async fn connect(
+        client: &NoiseClient,
+        server_name: &str,
+        server_addr: SocketAddr,
+    ) -> Option<NoiseConnection> {
+        let connect = NoiseConnect::new(server_addr).with_server_name(server_name);
+        let mut connection = match client.connect(connect).await {
+            Ok(value) => value,
+            Err(error) => {
+                error!(
+                    "{:?} failed to establish connection with {}. {}",
+                    client.local_addr(),
+                    server_name,
+                    error
+                );
+                return None;
+            }
+        };
+
+        if let Err(_error) = connection.keep_alive(true) {
+            error!("failed to keep alive the connection. {}", _error);
+            return None;
+        }
+
+        debug!(
+            "{:?} establish connection {} with {:?}",
+            connection.local_addr(),
+            connection.id(),
+            connection.remote_addr()
+        );
+
+        Some(connection)
     }
 
     impl Provider<NoiseConnection> for Connection<Receiver<NoiseConnection>> {
