@@ -9,7 +9,7 @@ pre-build = [
     # Use bindgen with cross
     # https://github.com/cross-rs/cross/wiki/FAQ#using-clang--bindgen
     # https://aws.github.io/aws-lc-rs/requirements/linux.html
-    "apt install --assume-yes build-essential libclang1 golang nasm",
+    "apt install --assume-yes build-essential libclang1 golang nasm wine",
     "apt install --assume-yes libclang-10-dev clang-10"
 ]
 
@@ -45,3 +45,9 @@ image = "ghcr.io/cross-rs/aarch64-unknown-linux-musl:main"
 
 [target.aarch64-linux-android]
 image = "ghcr.io/cross-rs/aarch64-linux-android:main"
+
+[target.i686-pc-windows-gnu]
+image = "ghcr.io/cross-rs/i686-pc-windows-gnu:main"
+
+[target.x86_64-pc-windows-gnu]
+image = "ghcr.io/cross-rs/x86_64-pc-windows-gnu:main"
