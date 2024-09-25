@@ -13,7 +13,7 @@ quics-protocol = { path = "../quics-protocol"}
 
 clap = { version = "4.5", features = ["std", "derive", "help", "usage"], default-features = false }
 tokio = { version = "1", features = ["rt-multi-thread", "io-util", "sync"], default-features = false }
-s2n-quic = { version = "1", features = ["provider-tls-s2n", "provider-address-token-default"], default-features = false }
+s2n-quic = { version = "1", features = ["provider-tls-default", "provider-address-token-default"], default-features = false }
 
 tracing = { version = "0.1", optional = true }
 tracing-subscriber = { version = "0.3", optional = true }

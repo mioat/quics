@@ -82,11 +82,11 @@ jobs:
             cross: true
             file-ext:
 
-          # - arch-name: i686-pc-windows-gnu
-          #   os: ubuntu-latest
-          #   target: i686-pc-windows-gnu
-          #   cross: true
-          #   file-ext: .exe
+          - arch-name: i686-pc-windows-gnu
+            os: ubuntu-latest
+            target: i686-pc-windows-gnu
+            cross: true
+            file-ext: .exe
 
           # - arch-name: i686-pc-windows-msvc
           #   os: windows-latest
@@ -94,17 +94,17 @@ jobs:
           #   cross: false
           #   file-ext: .exe
 
-          # - arch-name: x86_64-pc-windows-gnu
-          #   os: ubuntu-latest
-          #   target: x86_64-pc-windows-gnu
-          #   cross: true
-          #   file-ext: .exe
+          - arch-name: x86_64-pc-windows-gnu
+            os: ubuntu-latest
+            target: x86_64-pc-windows-gnu
+            cross: true
+            file-ext: .exe
 
-          # - arch-name: x86_64-pc-windows-msvc
-          #   os: windows-latest
-          #   target: x86_64-pc-windows-msvc
-          #   cross: false
-          #   file-ext: .exe
+          - arch-name: x86_64-pc-windows-msvc
+            os: windows-latest
+            target: x86_64-pc-windows-msvc
+            cross: false
+            file-ext: .exe
 
           - arch-name: x86_64-apple-darwin
             os: macos-latest
