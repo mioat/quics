@@ -4,7 +4,7 @@ use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6};
 use bytes::{BufMut, Bytes, BytesMut};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-use crate::{Streamable, ToBytes};
+use crate::{Resolver, Streamable, ToBytes};
 
 #[rustfmt::skip]
 mod consts {
@@ -134,20 +134,14 @@ pub enum SocketAddress {
 }
 
 impl SocketAddress {
-    pub async fn to_socket_address(self) -> Result<SocketAddr> {
+    pub async fn to_socket_address<R>(self, resolver: &R) -> Result<SocketAddr>
+    where
+        R: Resolver,
+    {
         let socket_address = match self {
-            SocketAddress::Domain(domain, port) => {
-                use tokio::net::lookup_host;
-
-                let mut iter = lookup_host((domain.as_str(), port)).await?;
-                let socket_address = iter.next().ok_or_else(|| {
-                    Error::other(format!("could not resolve domain '{}'", domain))
-                })?;
-
-                socket_address
-            }
-            SocketAddress::IPv4(addr) => addr.into(),
-            SocketAddress::IPv6(address) => address.into(),
+            Self::Domain(domain, port) => resolver.lookup(&domain, port).await?.into(),
+            Self::IPv4(addr) => addr.into(),
+            Self::IPv6(addr) => addr.into(),
         };
 
         Ok(socket_address)

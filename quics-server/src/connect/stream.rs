@@ -18,7 +18,7 @@ mod s2n_quic {
 
     impl<T> Builder<T>
     where
-        T: Provider<NoiseConnection> + 'static,
+        T: Provider<NoiseConnection> + Send + 'static,
     {
         pub fn new(connection: T) -> Self {
             Self { connection }

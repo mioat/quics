@@ -2,6 +2,7 @@ use clap::Parser;
 use quics_protocol::server::Server;
 use quics_server::connect::connection::Builder as ConnectionBuilder;
 use quics_server::connect::stream::Builder as StreamBuilder;
+use quics_server::dns::Resolver;
 
 /// QUICS Server
 #[derive(Parser, Debug)]
@@ -56,7 +57,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let connection = ConnectionBuilder::new(server).build();
     let stream = StreamBuilder::new(connection).build();
 
-    Server::with(stream).start().await;
+    Server::with(stream, Resolver::default()).start().await;
 
     Ok(())
 }
