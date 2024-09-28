@@ -1,5 +1,6 @@
 use std::future::Future;
 use std::io::Result;
+use std::net::SocketAddr;
 
 use bytes::Bytes;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -23,6 +24,10 @@ pub trait ToBytes {
     fn to_bytes(self) -> Bytes;
 }
 
-pub trait Provider<T>: Send {
+pub trait Provider<T> {
     fn fetch(&mut self) -> impl Future<Output = Option<T>> + Send;
+}
+
+pub trait Resolver {
+    fn lookup(&self, domain: &str, port: u16) -> impl Future<Output = Result<SocketAddr>> + Send;
 }

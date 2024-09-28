@@ -2,36 +2,41 @@ use std::marker::PhantomData;
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt, Result};
 
-use crate::{Provider, ToBytes};
+use crate::{Provider, Resolver, ToBytes};
 
-pub struct Server<R, RS>
+pub struct Server<R, RE, RS>
 where
     R: Provider<RS>,
+    RE: Resolver + Clone + Send + 'static,
     RS: AsyncReadExt + AsyncWriteExt + Unpin + Send + 'static,
 {
     accept: R,
+    resolver: RE,
     _accept_stream: PhantomData<RS>,
 }
 
-impl<R, RS> Server<R, RS>
+impl<R, RS, RE> Server<R, RE, RS>
 where
     R: Provider<RS>,
+    RE: Resolver + Clone + Send + Sync + 'static,
     RS: AsyncReadExt + AsyncWriteExt + Unpin + Send + 'static,
 {
-    pub fn with(accept: R) -> Self {
+    pub fn with(accept: R, resolver: RE) -> Self {
         Self {
             accept,
+            resolver,
             _accept_stream: PhantomData,
         }
     }
 
     pub async fn start(&mut self) {
         while let Some(stream) = self.accept.fetch().await {
-            tokio::spawn(async move { Self::handle_bidirectional(stream).await });
+            let resolver = self.resolver.clone();
+            tokio::spawn(async move { Self::handle_bidirectional(stream, resolver).await });
         }
     }
 
-    async fn handle_bidirectional(mut stream: RS) -> Result<()> {
+    async fn handle_bidirectional(mut stream: RS, resolver: RE) -> Result<()> {
         use crate::request::Request;
         use crate::response::Response;
         use crate::Streamable;
@@ -43,7 +48,7 @@ where
                 use tokio::io::copy_bidirectional;
                 use tokio::net::TcpStream;
 
-                let address = address.to_socket_address().await?;
+                let address = address.to_socket_address(&resolver).await?;
                 let mut connect = TcpStream::connect(address).await?;
 
                 stream.write_all(&Response::Succeed.to_bytes()).await?;
