@@ -856,7 +856,7 @@ dependencies = [
 
 [[package]]
 name = "quics-client"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "aws-lc-rs",
  "clap",
@@ -878,7 +878,7 @@ dependencies = [
 
 [[package]]
 name = "quics-server"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "aws-lc-rs",
  "clap",
