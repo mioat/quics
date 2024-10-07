@@ -1,10 +1,7 @@
-use std::{
-    error::Error,
-    net::{SocketAddr, SocketAddrV4, SocketAddrV6},
-};
+use std::{error::Error, future::Future, net::SocketAddr};
 
 use quics_protocol::{
-    request::{Request, SocketAddress},
+    request::{Address, Request},
     Provider,
 };
 
@@ -16,11 +13,11 @@ use tokio::{
 
 use crate::{error, info};
 
-pub struct Socks5 {
+pub struct SocksServer {
     inner: Receiver<(TcpStream, Request)>,
 }
 
-impl Socks5 {
+impl SocksServer {
     pub async fn with(address: String) -> std::result::Result<Self, Box<dyn Error>> {
         use tokio::net::TcpListener;
 
@@ -33,9 +30,9 @@ impl Socks5 {
             loop {
                 let sender = sender.clone();
                 match listener.accept().await {
-                    Ok((mut stream, _address)) => {
+                    Ok((stream, _address)) => {
                         tokio::spawn(async move {
-                            let request = match Self::handle(&mut stream).await {
+                            let request = match Self::handle(stream).await {
                                 Ok(value) => value,
                                 Err(_error) => {
                                     error!("{}", _error);
@@ -43,11 +40,14 @@ impl Socks5 {
                                 }
                             };
 
-                            if let Err(_error) = sender.send((stream, request)).await {
-                                return;
+                            if let Some(value) = request {
+                                if sender.send(value).await.is_err() {
+                                    return;
+                                }
                             }
                         });
                     }
+
                     Err(_error) => {
                         error!("failed to accept: {:?}", _error);
                     }
@@ -58,260 +58,174 @@ impl Socks5 {
         Ok(Self { inner: receiver })
     }
 
-    async fn handle(stream: &mut TcpStream) -> std::io::Result<Request> {
-        read_authentication(stream).await?;
-        stream.write_all(&[0x05, 0x00]).await?;
+    async fn handle(mut stream: TcpStream) -> Result<Option<(TcpStream, Request)>> {
+        use socks::socks5::{
+            Address as SocksAddress, Method as Socks5Method, Request as Socks5Request,
+            Response as Socks5Response,
+        };
 
-        let request = read_request(stream).await?;
+        use socks::Streamable;
 
-        match request.inner() {
-            Requests::TCPConnect(address) => {
-                info!("tcp connect {:?}", address);
-                let reply = [0x05, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0];
-                stream.write_all(&reply).await?;
-                return Ok(Request::TCPConnect(address.into()));
+        let methods = <Vec<Socks5Method> as Streamable>::read(&mut stream).await?;
+
+        // Authentication
+        let method = <Self as Authentication>::select(methods).await?;
+        <Socks5Method as Streamable>::write(&method, &mut stream).await?;
+
+        // Process Authentication
+        if !matches!(method, Socks5Method::NoAuthentication) {
+            <Self as Authentication>::process(&mut stream).await?;
+        }
+
+        // Read Request
+        let request = <Socks5Request as Streamable>::read(&mut stream).await?;
+
+        info!("SOCKS5 {:?}", request);
+
+        match request {
+            Socks5Request::Connect(address) => {
+                Socks5Response::unspecified_success()
+                    .write(&mut stream)
+                    .await?;
+
+                let address = match address {
+                    SocksAddress::IPv4(value) => Address::IPv4(value),
+                    SocksAddress::IPv6(value) => Address::IPv6(value),
+                    SocksAddress::Domain(domain, port) => Address::Domain(domain, port),
+                };
+
+                return Ok(Some((stream, Request::TCPConnect(address))));
             }
 
+            Socks5Request::Associate(address) => {
+                use tokio::net::UdpSocket;
+
+                // IPV4 & IPV6
+                let socket_addr = match socks5_udp::to_socket_address(address).await? {
+                    SocketAddr::V4(_) => "0.0.0.0:0",
+                    SocketAddr::V6(_) => "[::]:0",
+                };
+
+                let inbound = UdpSocket::bind(socket_addr).await?;
+                let outbound = UdpSocket::bind(socket_addr).await?;
+
+                let address = SocksAddress::from_socket_address(inbound.local_addr()?);
+                Socks5Response::Success(address).write(&mut stream).await?;
+
+                tokio::select! {
+                    // TCP Stream closed
+                    _ = stream.read_u8() => {}
+
+                    // UDP Transfer
+                    _ = socks5_udp::relay(inbound, outbound) => {}
+                }
+
+                return Ok(None);
+            }
             _ => {
-                let reply = [0x05, 0x00, 0x00, 0x07, 0, 0, 0, 0, 0, 0];
-                stream.write_all(&reply).await?;
+                Socks5Response::CommandNotSupported
+                    .write(&mut stream)
+                    .await?;
+
                 return Err(std::io::Error::other("unsupported socks command"));
             }
         };
     }
 }
 
-impl Provider<(TcpStream, Request)> for Socks5 {
+impl Authentication for SocksServer {
+    async fn select(_methods: Vec<socks::socks5::Method>) -> Result<socks::socks5::Method> {
+        Ok(socks::socks5::Method::NoAuthentication)
+    }
+
+    async fn process<T>(_stream: &mut T) -> Result<()>
+    where
+        T: AsyncReadExt + AsyncWriteExt + Unpin + Send,
+    {
+        Ok(())
+    }
+}
+
+pub trait Authentication {
+    fn select(
+        methods: Vec<socks::socks5::Method>,
+    ) -> impl Future<Output = Result<socks::socks5::Method>> + Send;
+    fn process<S>(stream: &mut S) -> impl Future<Output = Result<()>> + Send
+    where
+        S: AsyncReadExt + AsyncWriteExt + Unpin + Send;
+}
+
+impl Provider<(TcpStream, Request)> for SocksServer {
     async fn fetch(&mut self) -> Option<(TcpStream, Request)> {
         self.inner.recv().await
     }
 }
 
-/// # Authentication
-///
-/// ## Stream
-/// ```text
-///          +----+----------+----------+
-///          |VER | NMETHODS | METHODS  |
-///          +----+----------+----------+
-///          | 1  |    1     | 1 to 255 |
-///          +----+----------+----------+
-/// ```
-pub async fn read_authentication<S>(stream: &mut S) -> Result<SocksPact<Vec<AuthenticationMethod>>>
-where
-    S: AsyncReadExt + Unpin + Send,
-{
-    let mut buffer = [0u8; 2];
-    stream.read_exact(&mut buffer).await?;
+mod socks5_udp {
+    use socks::socks5::{Address, UdpPacket};
+    use socks::{Streamable, ToBytes};
+    use tokio::net::UdpSocket;
 
-    let method_num = buffer[1] as usize;
-    if method_num == 1 {
-        stream.read_exact(&mut [0u8; 1]).await?;
-        return Ok(SocksPact::new(
-            buffer[1],
-            vec![AuthenticationMethod::NoAuth],
-        ));
-    }
+    use super::*;
 
-    let mut methods = vec![0u8; method_num];
-    stream.read_exact(&mut methods).await?;
+    pub async fn to_socket_address(address: Address) -> Result<SocketAddr> {
+        use std::io::Error;
 
-    let list = methods
-        .into_iter()
-        .map(|e| AuthenticationMethod::from_u8(e))
-        .collect();
+        match address {
+            Address::Domain(domain, port) => {
+                use tokio::net::lookup_host;
+                let response = lookup_host((domain.as_str(), port)).await?;
+                let address = response.into_iter().next().ok_or_else(|| {
+                    Error::other(format!("could not resolve domain '{}'", domain))
+                })?;
 
-    Ok(SocksPact::new(buffer[0], list))
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub enum AuthenticationMethod {
-    NoAuth,              // X'00'
-    GSSAPI,              // X'01'
-    UsernamePassword,    // X'02'
-    IanaAssigned(u8),    // X'03'~X'7F'
-    ReservedPrivate(u8), // X'80'~X'FE'
-    NoAcceptableMethod,  // X'FF'
-}
-
-impl AuthenticationMethod {
-    #[rustfmt::skip]
-    pub fn as_u8(self) -> u8 {
-        match self {
-            Self::NoAuth                     => 0x00,
-            Self::GSSAPI                     => 0x01,
-            Self::UsernamePassword           => 0x03,
-            Self::IanaAssigned(value)    => value,
-            Self::ReservedPrivate(value) => value,
-            Self::NoAcceptableMethod         => 0xFF,
+                Ok(address)
+            }
+            Address::IPv4(addr) => Ok(addr.into()),
+            Address::IPv6(addr) => Ok(addr.into()),
         }
     }
 
-    #[rustfmt::skip]
-    pub fn from_u8(value: u8) -> Self {
-        match value {
-            0x00        => Self::NoAuth,
-            0x01        => Self::GSSAPI,
-            0x02        => Self::UsernamePassword,
-            0x03..=0x7F => Self::IanaAssigned(value),
-            0x80..=0xFE => Self::ReservedPrivate(value),
-            0xFF        => Self::NoAcceptableMethod,
+    async fn handle_udp_response(inbound: &UdpSocket, outbound: &UdpSocket) -> Result<()> {
+        let mut buffer = vec![0u8; 8192];
+
+        loop {
+            let (size, remote_addr) = outbound.recv_from(&mut buffer).await?;
+
+            let data = (&buffer[..size]).into();
+            let address = Address::from_socket_address(remote_addr);
+            let packet = UdpPacket::un_frag(address, data);
+
+            inbound.send(&packet.to_bytes()).await?;
         }
     }
-}
 
-#[derive(Debug)]
-pub struct SocksPact<T> {
-    version: u8,
-    inner: T,
-}
+    async fn handle_udp_request(inbound: &UdpSocket, outbound: &UdpSocket) -> Result<()> {
+        let mut buffer = vec![0u8; 8192];
 
-impl<T> SocksPact<T> {
-    pub fn new(version: u8, inner: T) -> Self {
-        Self { version, inner }
-    }
+        loop {
+            let (size, client_addr) = inbound.recv_from(&mut buffer).await?;
 
-    pub fn version(&self) -> u8 {
-        self.version
-    }
+            inbound.connect(client_addr).await?;
 
-    pub fn inner(self) -> T {
-        self.inner
-    }
-}
+            let packet = UdpPacket::read(&mut &buffer[..size]).await?;
+            let address = to_socket_address(packet.address).await?;
 
-/// # Request
-/// Reads a SOCKS request from the provided stream.
-///
-/// ## Stream
-/// ```text
-///          +----+-----+-------+------+----------+----------+
-///          |VER | CMD |  RSV  | ATYP | DST.ADDR | DST.PORT |
-///          +----+-----+-------+------+----------+----------+
-///          | 1  |  1  |   1   |  1   | Variable |    2     |
-///          +----+-----+-------+------+----------+----------+
-/// ```
-///
-pub async fn read_request<S>(stream: &mut S) -> Result<SocksPact<Requests>>
-where
-    S: AsyncReadExt + Unpin + Send,
-{
-    let mut buffer = [0u8; 3];
-    stream.read_exact(&mut buffer).await?;
-
-    let address = {
-        use std::io::{Error, ErrorKind};
-        use std::net::{Ipv4Addr, Ipv6Addr, SocketAddrV4, SocketAddrV6};
-
-        let mut buffer = [0u8; 1];
-        stream.read_exact(&mut buffer).await?;
-
-        let address_type = buffer[0];
-        let request = match address_type {
-            consts::SOCKS5_ADDRESS_TYPE_IPV4 => {
-                let mut buffer = [0u8; consts::IPV4_ADDRESS_LENGTH + consts::PORT_LENGTH];
-                stream.read_exact(&mut buffer).await?;
-
-                let ip = Ipv4Addr::new(buffer[0], buffer[1], buffer[2], buffer[3]);
-                let port = ((buffer[4] as u16) << 8) | (buffer[5] as u16);
-
-                RequestAddress::IPv4(SocketAddrV4::new(ip, port))
-            }
-
-            consts::SOCKS5_ADDRESS_TYPE_IPV6 => {
-                let mut buffer = [0u8; consts::IPV6_ADDRESS_LENGTH + consts::PORT_LENGTH];
-                stream.read_exact(&mut buffer).await?;
-
-                let ip = Ipv6Addr::new(
-                    (buffer[0] as u16) << 8 | buffer[1] as u16,
-                    (buffer[2] as u16) << 8 | buffer[3] as u16,
-                    (buffer[4] as u16) << 8 | buffer[5] as u16,
-                    (buffer[6] as u16) << 8 | buffer[7] as u16,
-                    (buffer[8] as u16) << 8 | buffer[9] as u16,
-                    (buffer[10] as u16) << 8 | buffer[11] as u16,
-                    (buffer[12] as u16) << 8 | buffer[13] as u16,
-                    (buffer[14] as u16) << 8 | buffer[15] as u16,
-                );
-                let port = ((buffer[16] as u16) << 8) | (buffer[17] as u16);
-
-                RequestAddress::IPv6(SocketAddrV6::new(ip, port, 0, 0))
-            }
-
-            consts::SOCKS5_ADDRESS_TYPE_DOMAIN_NAME => {
-                let mut buffer = [0u8; 1];
-                stream.read_exact(&mut buffer).await?;
-                let domain_len = buffer[0] as usize;
-
-                let mut buffer = vec![0u8; domain_len + consts::PORT_LENGTH];
-                stream.read_exact(&mut buffer).await?;
-
-                let domain = std::str::from_utf8(&buffer[0..domain_len])
-                    .map_err(|_| Error::new(ErrorKind::InvalidData, "invalid domain name"))?;
-
-                let port = ((buffer[domain_len] as u16) << 8) | (buffer[domain_len + 1] as u16);
-
-                RequestAddress::Domain(domain.to_string(), port)
-            }
-
-            _ => {
-                return Err(Error::new(
-                    ErrorKind::InvalidData,
-                    format!("unsupported socks request address type {}", address_type),
-                ))
-            }
-        };
-
-        request
-    };
-
-    let result = match buffer[1] {
-        consts::SOCKS5_CMD_TCP_BIND => Requests::TCPBind(address),
-        consts::SOCKS5_CMD_TCP_CONNECT => Requests::TCPConnect(address),
-        consts::SOCKS5_CMD_UDP_ASSOCIATE => Requests::UDPAssociate(address),
-        _ => Requests::NotSupported(address),
-    };
-
-    Ok(SocksPact::new(buffer[0], result))
-}
-
-#[rustfmt::skip]
-mod consts {
-    pub const SOCKS5_CMD_TCP_CONNECT:           u8 = 0x01;
-    pub const SOCKS5_CMD_TCP_BIND:              u8 = 0x02;
-    pub const SOCKS5_CMD_UDP_ASSOCIATE:         u8 = 0x03;
-
-    pub const SOCKS5_ADDRESS_TYPE_IPV4:         u8 = 0x01;
-    pub const SOCKS5_ADDRESS_TYPE_DOMAIN_NAME:  u8 = 0x03;
-    pub const SOCKS5_ADDRESS_TYPE_IPV6:         u8 = 0x04;
-
-    pub const PORT_LENGTH:                      usize = 2;
-    pub const IPV4_ADDRESS_LENGTH:              usize = 4;
-    pub const IPV6_ADDRESS_LENGTH:              usize = 16;
-}
-
-/// # SOCKS5 Request
-#[derive(Debug, Clone, PartialEq)]
-pub enum Requests {
-    TCPBind(RequestAddress),
-    TCPConnect(RequestAddress),
-    UDPAssociate(RequestAddress),
-    NotSupported(RequestAddress),
-}
-
-/// # SOCKS5 Request Address
-#[derive(Debug, Clone, PartialEq)]
-pub enum RequestAddress {
-    IPv4(SocketAddrV4),
-    IPv6(SocketAddrV6),
-    Domain(String, u16),
-}
-
-impl Into<SocketAddress> for RequestAddress {
-    fn into(self) -> SocketAddress {
-        match self {
-            Self::Domain(domain, port) => SocketAddress::Domain(domain, port),
-            Self::IPv4(address) => SocketAddress::IPv4(address),
-            Self::IPv6(address) => SocketAddress::IPv6(address),
+            outbound.send_to(&packet.data, address).await?;
         }
+    }
+
+    pub async fn relay(inbound: UdpSocket, outbound: UdpSocket) -> Result<()> {
+        use tokio::try_join;
+
+        match try_join!(
+            handle_udp_request(&inbound, &outbound),
+            handle_udp_response(&inbound, &outbound)
+        ) {
+            Ok(_) => {}
+            Err(error) => return Err(error),
+        }
+
+        Ok(())
     }
 }

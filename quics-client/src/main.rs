@@ -3,7 +3,7 @@ use std::net::ToSocketAddrs;
 use clap::Parser;
 use quics_client::connect::connection::Builder as ConnectionBuilder;
 use quics_client::connect::stream::Builder as StreamBuilder;
-use quics_client::socks::Socks5;
+use quics_client::socks::SocksServer;
 use quics_protocol::client::Client;
 
 /// QUICS Client
@@ -90,7 +90,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let stream = stream_builder.build();
 
-    let socks_server = Socks5::with(args.listen).await?;
+    let socks_server = SocksServer::with(args.listen).await?;
 
     Client::with(socks_server, stream).start().await;
 

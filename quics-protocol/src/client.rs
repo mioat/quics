@@ -2,7 +2,8 @@ use std::marker::PhantomData;
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt, Result};
 
-use crate::{request::Request, Provider};
+use crate::request::Request;
+use crate::Provider;
 
 pub struct Client<L, R, LS, RS>
 where
@@ -34,23 +35,20 @@ where
     pub async fn start(&mut self) {
         while let Some((local, request)) = self.local.fetch().await {
             if let Some(remote) = self.remote.fetch().await {
-                tokio::spawn(
-                    async move { Self::handle_bidirectional(local, remote, request).await },
-                );
+                tokio::spawn(async move { Self::handle(local, remote, request).await });
             }
         }
     }
 
-    async fn handle_bidirectional(mut local: LS, mut remote: RS, request: Request) -> Result<()> {
+    async fn handle(mut local: LS, mut remote: RS, request: Request) -> Result<()> {
         use tokio::io::copy_bidirectional;
 
         use crate::response::Response;
         use crate::Streamable;
-        use crate::ToBytes;
 
-        remote.write_all(&request.to_bytes()).await?;
+        Streamable::write(&request, &mut remote).await?;
 
-        let response = Response::read_from(&mut remote).await?;
+        let response = <Response as Streamable>::read(&mut remote).await?;
 
         if let Response::Succeed = response {
             copy_bidirectional(&mut local, &mut remote).await?;

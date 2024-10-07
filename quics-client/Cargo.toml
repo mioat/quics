@@ -9,7 +9,8 @@ trace = ["tracing", "tracing-subscriber"]
 limit-connection-reuses = []
 
 [dependencies]
-quics-protocol = { path = "../quics-protocol"}
+quics-protocol = { path = "../quics-protocol" }
+socks = { git = "https://github.com/poruos/socks.git" }
 
 clap = { version = "4.5", features = ["std", "derive", "help", "usage"], default-features = false }
 tokio = { version = "1", features = ["rt-multi-thread", "io-util", "sync"], default-features = false }
